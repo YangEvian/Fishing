@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Gyro Fishing 3D</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            text-align: center;
+        }
+        #status { font-size: 24px; font-weight: bold; text-shadow: 1px 1px 2px black; margin-bottom: 20px; }
+        button {
+            pointer-events: auto;
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #ff9900;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            cursor: pointer;
+        }
+        button:active { background: #cc7a00; }
+        #debug {
+            position: absolute; bottom: 10px; left: 10px; color: #0f0; font-family: monospace; font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="status">Ready to Fish?</div>
+        <button id="start-btn">Start Fishing (Enable Gyro)</button>
+        <button id="action-btn" style="display:none; background:#2196F3; margin-top:10px;">Cast Line / Reel In</button>
+    </div>
+    <div id="debug"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- Variables ---
+        let camera, scene, renderer;
+        let rod, rodPivot, line, bobber;
+        let isFishing = false;
+        let lineLength = 2;
+        
+        const statusEl = document.getElementById('status');
+        const startBtn = document.getElementById('start-btn');
+        const actionBtn = document.getElementById('action-btn');
+        const debugEl = document.getElementById('debug');
+
+        // --- Initialization ---
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            scene.fog = new THREE.Fog(0x87CEEB, 10, 50);
+
+            // 2. Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 2, 5); // Behind the player
+            
+            // 3. Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(5, 10, 7);
+            scene.add(dirLight);
+
+            // 5. The Ocean
+            const waterGeo = new THREE.PlaneGeometry(100, 100);
+            const waterMat = new THREE.MeshStandardMaterial({ color: 0x006994, roughness: 0.1 });
+            const water = new THREE.Mesh(waterGeo, waterMat);
+            water.rotation.x = -Math.PI / 2;
+            scene.add(water);
+
+            // 6. The Fishing Rod
+            // We create a pivot point so the rod rotates from the handle, not the center
+            rodPivot = new THREE.Group();
+            rodPivot.position.set(0, 1.5, 4); // Position relative to camera
+            scene.add(rodPivot);
+
+            // Rod Mesh
+            const rodGeo = new THREE.CylinderGeometry(0.05, 0.1, 4, 8);
+            const rodMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            rod = new THREE.Mesh(rodGeo, rodMat);
+            rod.position.set(0, 0, -2); // Offset rod so handle is at pivot
+            rod.rotation.x = -Math.PI / 2; // Point forward
+            rodPivot.add(rod);
+
+            // The Line (Visual representation)
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,-2,0)]);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+            line = new THREE.Line(lineGeo, lineMat);
+            scene.add(line);
+
+            // The Bobber
+            const bobberGeo = new THREE.SphereGeometry(0.15, 16, 16);
+            const bobberMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+            bobber = new THREE.Mesh(bobberGeo, bobberMat);
+            scene.add(bobber);
+
+            window.addEventListener('resize', onWindowResize, false);
+            animate();
+        }
+
+        // --- Gyroscope Logic ---
+        function handleOrientation(event) {
+            // Beta: Front/Back tilt (-180 to 180)
+            // Gamma: Left/Right tilt (-90 to 90)
+            
+            const beta = event.beta; 
+            const gamma = event.gamma;
+
+            if (rodPivot) {
+                // Map phone tilt to rod rotation
+                // We clamp values so the rod doesn't spin 360 degrees
+                const xRot = THREE.MathUtils.degToRad(beta - 45); // -45 to offset holding position
+                const zRot = THREE.MathUtils.degToRad(gamma);
+
+                rodPivot.rotation.x = xRot;
+                rodPivot.rotation.z = -zRot; // Invert for natural feel
+                
+                debugEl.innerText = `B: ${Math.round(beta)} | G: ${Math.round(gamma)}`;
+            }
+        }
+
+        // --- Permission Handling (Crucial for iOS) ---
+        async function requestAccess() {
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                // iOS 13+
+                try {
+                    const response = await DeviceOrientationEvent.requestPermission();
+                    if (response === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                        startGame();
+                    } else {
+                        alert("Permission denied. Game cannot read phone movement.");
+                    }
+                } catch (e) {
+                    alert(e);
+                }
+            } else {
+                // Android / Non-iOS 13+
+                window.addEventListener('deviceorientation', handleOrientation);
+                startGame();
+            }
+        }
+
+        function startGame() {
+            startBtn.style.display = 'none';
+            actionBtn.style.display = 'block';
+            statusEl.innerText = "Tilt phone to move rod!";
+        }
+
+        // --- Game Mechanics ---
+        actionBtn.addEventListener('click', () => {
+            if (!isFishing) {
+                // Cast
+                isFishing = true;
+                lineLength = 5; 
+                statusEl.innerText = "Waiting for a bite...";
+                actionBtn.innerText = "Reel In";
+            } else {
+                // Reel
+                isFishing = false;
+                lineLength = 2;
+                statusEl.innerText = "Reeled in!";
+                actionBtn.innerText = "Cast Line";
+            }
+        });
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Update Line Logic
+            if (rod && rodPivot) {
+                // Calculate the position of the rod tip
+                const tipPos = new THREE.Vector3(0, 2, 0); // Top of the cylinder (rod)
+                tipPos.applyMatrix4(rod.matrixWorld);
+
+                // Update Bobber Position
+                // If fishing, bobber sits on water (y=0), otherwise it hangs from rod
+                if (isFishing) {
+                    // Lerp bobber towards a spot in front of the rod
+                    const targetX = tipPos.x;
+                    const targetZ = tipPos.z - lineLength;
+                    bobber.position.lerp(new THREE.Vector3(targetX, 0, targetZ), 0.05);
+                } else {
+                    // Dangling
+                    bobber.position.copy(tipPos);
+                    bobber.position.y -= 1; // Hang down
+                }
+
+                // Update Line Geometry
+                const points = [tipPos, bobber.position];
+                line.geometry.setFromPoints(points);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Run
+        init();
+        startBtn.addEventListener('click', requestAccess);
+
+    </script>
+</body>
+</html>
